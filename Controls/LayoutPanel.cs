@@ -177,11 +177,13 @@ namespace iSpyApplication.Controls
 
                         if (cw.Camera != null)
                         {
-                            var bmp = cw.LastFrame;
-                            if (bmp != null)
+                            using (var bmp = cw.LastFrame)
                             {
-                                p.Width = bmp.Width + 2;
-                                p.Height = bmp.Height + 32;
+                                if (bmp != null)
+                                {
+                                    p.Width = bmp.Width + 2;
+                                    p.Height = bmp.Height + 32;
+                                }
                             }
                         }
                     }

@@ -1692,7 +1692,15 @@ namespace iSpyApplication.Controls
                         {
                             try
                             {
-                                _timeLapseWriter.WriteFrame(ResizeBitmap(bm));
+                                var rb = ResizeBitmap(bm);
+                                try
+                                {
+                                    _timeLapseWriter.WriteFrame(rb);
+                                }
+                                finally
+                                {
+                                    if (rb != bm) rb.Dispose();
+                                }
                                 _timeLapseFrameCount++;
                             }
                             catch (Exception ex)
@@ -2064,7 +2072,9 @@ namespace iSpyApplication.Controls
                 g.PixelOffsetMode = PixelOffsetMode.HighSpeed;
                 g.SmoothingMode = SmoothingMode.None;
                 g.InterpolationMode = InterpolationMode.Default;
-                g.DrawImage(LastFrame, r);
+                // Scale the frame being written, not the live LastFrame: with a recording profile
+                // that resizes, buffered (pre-record) frames were written as the current frame.
+                g.DrawImage(frame, r);
             }
             return b;
         }
@@ -3493,7 +3503,15 @@ namespace iSpyApplication.Controls
             switch (fa.FrameType)
             {
                 case Enums.FrameType.Video:
-                    _writer.WriteFrame(ResizeBitmap(fa.Frame), fa.TimeStamp);
+                    var rb = ResizeBitmap(fa.Frame);
+                    try
+                    {
+                        _writer.WriteFrame(rb, fa.TimeStamp);
+                    }
+                    finally
+                    {
+                        if (rb != fa.Frame) rb.Dispose();
+                    }
                     if (fa.Level > maxAlarm || peakFrame == null)
                     {
                         maxAlarm = fa.Level;

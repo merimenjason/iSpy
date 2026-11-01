@@ -881,7 +881,8 @@ namespace iSpyApplication
 
                 if (_ctw != null && _ctw.TripWireEditor1 != null)
                 {
-                    _ctw.TripWireEditor1.LastFrame = e.Frame;
+                    // The editor keeps the bitmap it's given and the camera disposes its frame afterwards.
+                    _ctw.TripWireEditor1.LastFrame = (Bitmap) e.Frame.Clone();
                 }
                 if (_pip != null && _pip.areaSelector1 != null)
                 {

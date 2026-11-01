@@ -615,7 +615,17 @@ namespace iSpyApplication.Controls
                 }
             }
 
-            nf.Invoke(this, new NewFrameEventArgs(bmOrig));
+            try
+            {
+                nf.Invoke(this, new NewFrameEventArgs(bmOrig));
+            }
+            finally
+            {
+                // Every listener copies what it keeps (LastFrame, the record buffer, clones), so this
+                // frame is finished with. Not disposing it left one full-size bitmap per camera per
+                // frame for the garbage collector.
+                bmOrig.Dispose();
+            }
 
 
             if (bMotion)
@@ -647,14 +657,16 @@ namespace iSpyApplication.Controls
                         {
                             if (pip.CW != null && !pip.CW.VideoSourceErrorState)
                             {
-                                var bmppip = pip.CW.LastFrame;
-                                if (bmppip != null)
+                                using (var bmppip = pip.CW.LastFrame)
                                 {
-                                    var r = new Rectangle(Convert.ToInt32(pip.R.X*wmulti),
-                                        Convert.ToInt32(pip.R.Y*hmulti), Convert.ToInt32(pip.R.Width*wmulti),
-                                        Convert.ToInt32(pip.R.Height*hmulti));
+                                    if (bmppip != null)
+                                    {
+                                        var r = new Rectangle(Convert.ToInt32(pip.R.X*wmulti),
+                                            Convert.ToInt32(pip.R.Y*hmulti), Convert.ToInt32(pip.R.Width*wmulti),
+                                            Convert.ToInt32(pip.R.Height*hmulti));
 
-                                    g.DrawImage(bmppip, r);
+                                        g.DrawImage(bmppip, r);
+                                    }
                                 }
                             }
 
