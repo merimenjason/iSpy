@@ -69,6 +69,8 @@ internal static class Program
         Console.WriteLine("  1  Install the fix" + (patched ? " again" : ""));
         Console.WriteLine("  2  Remove the fix (restore the original files)");
         Console.WriteLine("  3  Save iSpy's latest error details to the desktop");
+        Console.WriteLine("  4  Apply the recommended settings (GPU decoding, no motion detection, ...)");
+        Console.WriteLine("  5  Undo the recommended settings");
         Console.WriteLine("  Q  Quit without changing anything");
         Console.Write("Choose: ");
         var choice = (Console.ReadLine() ?? "").Trim().ToUpperInvariant();
@@ -88,6 +90,7 @@ internal static class Program
             Console.WriteLine();
             Console.WriteLine("Installed. The originals are saved in " + backup);
             Console.WriteLine();
+            OfferSettings(false);
             Console.WriteLine("Starting iSpy to check it works (this takes about 30 seconds)...");
             var started = DateTime.Now;
             if (StartsAndStaysUp(exe))
@@ -128,7 +131,73 @@ internal static class Program
             Pause();
             return 0;
         }
+        if (choice == "4")
+        {
+            if (!StopISpy()) return 1;
+            if (OfferSettings(true))
+                OfferStart(exe);
+            else
+                Pause();
+            return 0;
+        }
+        if (choice == "5")
+        {
+            var folders = SettingsTuner.FindSettingsFolders().Where(SettingsTuner.HasBackup).ToList();
+            var xml = ChooseSettingsFolder(folders);
+            if (xml == null)
+            {
+                Console.WriteLine("There are no saved settings to go back to.");
+                Pause();
+                return 0;
+            }
+            if (!StopISpy()) return 1;
+            SettingsTuner.Undo(xml);
+            OfferStart(exe);
+            return 0;
+        }
         return 0;
+    }
+
+    // iSpy must already be stopped: it saves its settings when it exits, over any changes made here.
+    private static bool OfferSettings(bool chosen)
+    {
+        Console.WriteLine("Recommended settings for speed:");
+        Console.WriteLine("  - GPU decoding on for the RTSP (FFmpeg) cameras");
+        Console.WriteLine("  - Motion detection off on every camera: recordings then only start when you");
+        Console.WriteLine("    record by hand or on a schedule, not on movement");
+        Console.WriteLine("  - No pre-record buffer on MJPEG/JPEG cameras (it holds raw frames)");
+        Console.WriteLine("  - Main window redraws at most 10 times a second (instead of 20)");
+        if (!chosen)
+        {
+            Console.Write("Apply them too? (Y/n): ");
+            if ((Console.ReadLine() ?? "").Trim().StartsWith("n", StringComparison.OrdinalIgnoreCase))
+            {
+                Console.WriteLine("Settings left as they are (choose 4 later to apply them).");
+                Console.WriteLine();
+                return false;
+            }
+        }
+        var xml = ChooseSettingsFolder(SettingsTuner.FindSettingsFolders());
+        if (xml == null)
+        {
+            Console.WriteLine("Couldn't find iSpy's settings (%AppData%\\iSpy\\XML). Nothing was changed.");
+            return false;
+        }
+        SettingsTuner.Apply(xml);
+        Console.WriteLine("Done. To go back, run this again and choose 5.");
+        Console.WriteLine();
+        return true;
+    }
+
+    private static string ChooseSettingsFolder(List<string> folders)
+    {
+        if (folders.Count <= 1)
+            return folders.FirstOrDefault();
+        Console.WriteLine("iSpy settings were found for more than one Windows user:");
+        for (var i = 0; i < folders.Count; i++)
+            Console.WriteLine("  " + (i + 1) + "  " + folders[i]);
+        Console.Write("Which one? (number): ");
+        return int.TryParse(Console.ReadLine(), out var n) && n >= 1 && n <= folders.Count ? folders[n - 1] : null;
     }
 
     private static string FindInstall(string[] args)
