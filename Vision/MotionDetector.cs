@@ -6,10 +6,12 @@
 // contacts@aforgenet.com
 //
 
+using System;
 using System.Drawing;
 using System.Drawing.Imaging;
 using AForge;
 using AForge.Imaging;
+using AForge.Imaging.Filters;
 
 namespace iSpyApplication.Vision
 {
@@ -62,6 +64,26 @@ namespace iSpyApplication.Vision
 
         // dummy object to lock for synchronization
         private readonly object _sync = new object( );
+
+        /// <summary>
+        /// Frames wider than this are shrunk before detecting motion: motion shows up as well at this size, for a
+        /// fraction of the work on HD cameras. 0 detects at full size. Set with MotionDetectionMaxWidth in
+        /// iSpy.exe.config.
+        /// </summary>
+        public static readonly int MaxProcessingWidth = ReadMaxProcessingWidth();
+
+        // Size of the frames detection runs on relative to the video frames (1 when not shrunk). Motion zones
+        // are given in video frame pixels.
+        private double _scaleX = 1, _scaleY = 1;
+        // The motion frame scaled up to the video frame, for overlays, when detection runs shrunk.
+        private UnmanagedImage _overlayMotion;
+        private bool _overlayStale = true;
+
+        private static int ReadMaxProcessingWidth()
+        {
+            var value = System.Configuration.ConfigurationManager.AppSettings["MotionDetectionMaxWidth"];
+            return int.TryParse(value, out var width) && width >= 0 ? width : 640;
+        }
 
         /// <summary>
         /// Motion detection algorithm to apply to each video frame.
@@ -287,58 +309,106 @@ namespace iSpyApplication.Vision
                 if (_detector == null)
                     return 0;
 
-                _videoWidth = videoFrame.Width;
-                _videoHeight = videoFrame.Height;
-
-                if (_area == 0)
-                    _area = _videoWidth*_videoHeight;
-
-                // call motion detection
-                _detector.ProcessFrame(videoFrame);
-                var motionLevel = _detector.MotionLevel;
-
-                // check if motion zones are specified
-                if (_detector.MotionFrame!=null && _motionZones != null)
+                UnmanagedImage shrunk = null;
+                try
                 {
-                    if (_zonesFrame == null)
+                    var frame = videoFrame;
+                    if (MaxProcessingWidth > 0 && videoFrame.Width > MaxProcessingWidth)
                     {
-                        CreateMotionZonesFrame();
+                        var height = Math.Max(1, (int) Math.Round((double) videoFrame.Height * MaxProcessingWidth / videoFrame.Width));
+                        shrunk = new ResizeBilinear(MaxProcessingWidth, height).Apply(videoFrame);
+                        frame = shrunk;
                     }
+                    return ProcessFrameAtSize(videoFrame, frame);
+                }
+                finally
+                {
+                    shrunk?.Dispose();
+                }
+            }
+        }
 
-                    if (_zonesFrame != null && (_videoWidth == _zonesFrame.Width) && (_videoHeight == _zonesFrame.Height))
-                    {
-                        unsafe
-                        {
-                            // pointers to background and current frames
-                            var zonesPtr = (byte*) _zonesFrame.ImageData.ToPointer();
-                            var motionPtr = (byte*) _detector.MotionFrame.ImageData.ToPointer();
+        // Detects motion in frame (videoFrame itself, or a shrunk copy) and applies any overlay to videoFrame.
+        private float ProcessFrameAtSize(UnmanagedImage videoFrame, UnmanagedImage frame)
+        {
+            if (frame.Width != _videoWidth || frame.Height != _videoHeight)
+            {
+                // New size: the motion zones have to be redrawn at it.
+                _videoWidth = frame.Width;
+                _videoHeight = frame.Height;
+                _scaleX = (double) frame.Width / videoFrame.Width;
+                _scaleY = (double) frame.Height / videoFrame.Height;
+                if (_zonesFrame != null)
+                {
+                    _zonesFrame.Dispose();
+                    _zonesFrame = null;
+                }
+                _area = 0;
+            }
 
-                            motionLevel = 0;
+            if (_area == 0)
+                _area = _videoWidth*_videoHeight;
 
-                            for (int i = 0, frameSize = _zonesFrame.Stride*_videoHeight;
-                                i < frameSize;
-                                i++, zonesPtr++, motionPtr++)
-                            {
-                                *motionPtr &= *zonesPtr;
-                                motionLevel += (*motionPtr & 1);
-                            }
-                            motionLevel /= _area;
-                        }
-                    }
+            // call motion detection
+            _detector.ProcessFrame(frame);
+            var motionLevel = _detector.MotionLevel;
+
+            // check if motion zones are specified
+            if (_detector.MotionFrame!=null && _motionZones != null)
+            {
+                if (_zonesFrame == null)
+                {
+                    CreateMotionZonesFrame();
                 }
 
-                // call motion post processing
-                ApplyOverlay(videoFrame);
-                return motionLevel;                
+                if (_zonesFrame != null && (_videoWidth == _zonesFrame.Width) && (_videoHeight == _zonesFrame.Height))
+                {
+                    unsafe
+                    {
+                        // pointers to background and current frames
+                        var zonesPtr = (byte*) _zonesFrame.ImageData.ToPointer();
+                        var motionPtr = (byte*) _detector.MotionFrame.ImageData.ToPointer();
+
+                        motionLevel = 0;
+
+                        for (int i = 0, frameSize = _zonesFrame.Stride*_videoHeight;
+                            i < frameSize;
+                            i++, zonesPtr++, motionPtr++)
+                        {
+                            *motionPtr &= *zonesPtr;
+                            motionLevel += (*motionPtr & 1);
+                        }
+                        motionLevel /= _area;
+                    }
+                }
             }
+
+            // call motion post processing
+            _overlayStale = true;
+            ApplyOverlay(videoFrame);
+            return motionLevel;
         }
 
         public void ApplyOverlay(UnmanagedImage videoFrame)
         {
-            if ((_processor != null) && (_detector?.MotionFrame != null))
+            if ((_processor == null) || (_detector?.MotionFrame == null))
+                return;
+
+            var motion = _detector.MotionFrame;
+            if (motion.Width != videoFrame.Width || motion.Height != videoFrame.Height)
             {
-                _processor.ProcessFrame(videoFrame, _detector.MotionFrame);
+                // Detection ran on a shrunk copy: scale its motion frame up to the video frame (once per
+                // detected frame; overlays are also drawn on the frames in between).
+                if (_overlayStale || _overlayMotion == null || _overlayMotion.Width != videoFrame.Width ||
+                    _overlayMotion.Height != videoFrame.Height)
+                {
+                    _overlayMotion?.Dispose();
+                    _overlayMotion = new ResizeNearestNeighbor(videoFrame.Width, videoFrame.Height).Apply(motion);
+                    _overlayStale = false;
+                }
+                motion = _overlayMotion;
             }
+            _processor.ProcessFrame(videoFrame, motion);
         }
 
         /// <summary>
@@ -358,6 +428,13 @@ namespace iSpyApplication.Vision
 
                 _videoWidth  = 0;
                 _videoHeight = 0;
+                _scaleX = _scaleY = 1;
+
+                if (_overlayMotion != null)
+                {
+                    _overlayMotion.Dispose();
+                    _overlayMotion = null;
+                }
 
                 if ( _zonesFrame != null )
                 {
@@ -390,8 +467,12 @@ namespace iSpyApplication.Vision
                     var imageRect = new Rectangle( 0, 0, _videoWidth, _videoHeight );
                     
                     // draw all motion zones on motion frame
-                    foreach ( Rectangle rect in _motionZones )
+                    foreach ( Rectangle zone in _motionZones )
                     {
+                        // Zones are in video frame pixels; detection may run on a shrunk frame. (Intersecting
+                        // the foreach variable itself used to change only a copy, so zones weren't clipped.)
+                        var rect = new Rectangle((int) (zone.X * _scaleX), (int) (zone.Y * _scaleY),
+                            (int) Math.Ceiling(zone.Width * _scaleX), (int) Math.Ceiling(zone.Height * _scaleY));
                         rect.Intersect( imageRect );
 
                         // rectangle's dimension
