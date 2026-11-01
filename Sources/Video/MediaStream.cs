@@ -254,15 +254,20 @@ namespace iSpyApplication.Sources.Video
 
         public AVPixelFormat GetPixelFormat(AVCodecContext* ctx, AVPixelFormat* pix_fmts)
         {
+            // Pick the GPU format if the decoder offers it for this stream (this used to skip entries and
+            // test the wrong one), otherwise the first software format, so decoding falls back to the CPU.
             for (var p = pix_fmts; *p != AVPixelFormat.AV_PIX_FMT_NONE; p++)
             {
-                if (*pix_fmts == _hwPixFmt)
-                {
+                if (*p == _hwPixFmt)
                     return _hwPixFmt;
-                }
-                pix_fmts++;
             }
-            return _videoCodecContext->pix_fmt;
+            for (var p = pix_fmts; *p != AVPixelFormat.AV_PIX_FMT_NONE; p++)
+            {
+                var desc = ffmpeg.av_pix_fmt_desc_get(*p);
+                if (desc != null && (desc->flags & ffmpeg.AV_PIX_FMT_FLAG_HWACCEL) == 0)
+                    return *p;
+            }
+            return *pix_fmts;
         }
 
 
@@ -590,6 +595,7 @@ namespace iSpyApplication.Sources.Video
 
             var audioInited = false;
             var videoInited = false;
+            var convertFormat = AVPixelFormat.AV_PIX_FMT_NONE;
             byte[] ourBuffer = null, ffmpegBuffer = null;
             var dstData = new byte_ptrArray4();
             var dstLinesize = new int_array4();
@@ -748,20 +754,24 @@ namespace iSpyApplication.Sources.Video
                         if (ret == 0 && ef)
                         {
                             pts = vf->best_effort_timestamp;
-                            AVPixelFormat srcFmt;
-                            if (_hwDeviceCtx != null)
+                            // Only frames the GPU decoded need copying back to memory: the decoder falls
+                            // back to the CPU for streams the GPU can't handle, and copying those failed,
+                            // which showed as a black picture.
+                            if (_hwDeviceCtx != null && vf->format == (int) _hwPixFmt)
                             {
-                                srcFmt = AVPixelFormat.AV_PIX_FMT_NV12;
                                 var output = ffmpeg.av_frame_alloc();
-                                ffmpeg.av_hwframe_transfer_data(output, vf, 0);
-                                ffmpeg.av_frame_copy_props(output, vf);
-                                ffmpeg.av_frame_free(&vf);
-                                vf = output;
+                                if (ffmpeg.av_hwframe_transfer_data(output, vf, 0) >= 0)
+                                {
+                                    ffmpeg.av_frame_copy_props(output, vf);
+                                    ffmpeg.av_frame_free(&vf);
+                                    vf = output;
+                                }
+                                else
+                                {
+                                    ffmpeg.av_frame_free(&output);
+                                }
                             }
-                            else
-                            {
-                                srcFmt = (AVPixelFormat)vf->format;
-                            }
+                            var srcFmt = (AVPixelFormat) vf->format;
 
                             if (!videoInited)
                             {
@@ -772,8 +782,16 @@ namespace iSpyApplication.Sources.Video
                                 var convertedFrameBufferSize = ffmpeg.av_image_get_buffer_size(AVPixelFormat.AV_PIX_FMT_BGR24, _finalSize.Width, _finalSize.Height, 1);
                                 pConvertedFrameBuffer = Marshal.AllocHGlobal(convertedFrameBufferSize);
                                 ffmpeg.av_image_fill_arrays(ref dstData, ref dstLinesize, (byte*)pConvertedFrameBuffer, AVPixelFormat.AV_PIX_FMT_BGR24, _finalSize.Width, _finalSize.Height, 1);
-                                pConvertContext = ffmpeg.sws_getContext(_videoCodecContext->width, _videoCodecContext->height, NormalizePixelFormat(srcFmt), _finalSize.Width, _finalSize.Height, AVPixelFormat.AV_PIX_FMT_BGR24, ffmpeg.SWS_FAST_BILINEAR, null, null, null);
+                            }
 
+                            // (Re)create the converter when the frame format changes, e.g. GPU frames (NV12)
+                            // after a fallback to the CPU (YUV420P) or the other way round.
+                            if (pConvertContext == null || srcFmt != convertFormat)
+                            {
+                                if (pConvertContext != null)
+                                    ffmpeg.sws_freeContext(pConvertContext);
+                                convertFormat = srcFmt;
+                                pConvertContext = ffmpeg.sws_getContext(_videoCodecContext->width, _videoCodecContext->height, NormalizePixelFormat(srcFmt), _finalSize.Width, _finalSize.Height, AVPixelFormat.AV_PIX_FMT_BGR24, ffmpeg.SWS_FAST_BILINEAR, null, null, null);
                             }
 
                             Log("SWS_SCALE", ffmpeg.sws_scale(pConvertContext, vf->data, vf->linesize, 0, _videoCodecContext->height, dstData, dstLinesize));
