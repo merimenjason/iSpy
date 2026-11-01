@@ -69,7 +69,7 @@ internal static class Program
         Console.WriteLine("  1  Install the fix" + (patched ? " again" : ""));
         Console.WriteLine("  2  Remove the fix (restore the original files)");
         Console.WriteLine("  3  Save iSpy's latest error details to the desktop");
-        Console.WriteLine("  4  Apply the recommended settings (GPU decoding, no motion detection, ...)");
+        Console.WriteLine("  4  Apply the recommended settings (GPU decoding, lower redraw rate)");
         Console.WriteLine("  5  Undo the recommended settings");
         Console.WriteLine("  Q  Quit without changing anything");
         Console.Write("Choose: ");
@@ -163,14 +163,11 @@ internal static class Program
     {
         Console.WriteLine("Recommended settings for speed:");
         Console.WriteLine("  - GPU decoding on for the RTSP (FFmpeg) cameras");
-        Console.WriteLine("  - Motion detection off on every camera: recordings then only start when you");
-        Console.WriteLine("    record by hand or on a schedule, not on movement");
-        Console.WriteLine("  - No pre-record buffer on MJPEG/JPEG cameras (it holds raw frames)");
         Console.WriteLine("  - Main window redraws at most 10 times a second (instead of 20)");
         if (!chosen)
         {
-            Console.Write("Apply them too? (Y/n): ");
-            if ((Console.ReadLine() ?? "").Trim().StartsWith("n", StringComparison.OrdinalIgnoreCase))
+            Console.Write("Apply them too? (y/N): ");
+            if (!(Console.ReadLine() ?? "").Trim().StartsWith("y", StringComparison.OrdinalIgnoreCase))
             {
                 Console.WriteLine("Settings left as they are (choose 4 later to apply them).");
                 Console.WriteLine();

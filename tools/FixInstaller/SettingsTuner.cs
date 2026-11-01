@@ -42,7 +42,7 @@ internal static class SettingsTuner
         File.Copy(objectsPath, Path.Combine(backup, "objects.xml"));
         File.Copy(configPath, Path.Combine(backup, "config.xml"));
 
-        int gpu = 0, detection = 0, buffers = 0, cameras = 0;
+        int gpu = 0, cameras = 0;
         var objects = Load(objectsPath);
         foreach (var camera in objects.Root?.Element("cameras")?.Elements("camera") ?? Enumerable.Empty<XElement>())
         {
@@ -57,22 +57,7 @@ internal static class SettingsTuner
                 gpu++;
             }
 
-            // Motion detection off (not used for recording here).
-            var detector = camera.Element("detector");
-            if (detector != null && detector.Attribute("type")?.Value != "None")
-            {
-                detector.SetAttributeValue("type", "None");
-                detection++;
-            }
-
-            // No pre-record buffer for cameras that keep it as raw frames (not FFmpeg ones, whose buffer is
-            // the small compressed stream). Without motion detection, recordings are started by hand anyway.
-            var recorder = camera.Element("recorder");
-            if (!isFfmpeg && recorder != null && (recorder.Attribute("bufferseconds")?.Value ?? "0") != "0")
-            {
-                recorder.SetAttributeValue("bufferseconds", "0");
-                buffers++;
-            }
+            // Motion detection and the pre-record buffer are left alone: recordings start on motion alerts.
         }
         Save(objects, objectsPath);
 
@@ -88,8 +73,6 @@ internal static class SettingsTuner
 
         Console.WriteLine("  " + cameras + " cameras found.");
         Console.WriteLine("  GPU decoding switched on:        " + gpu + " RTSP cameras");
-        Console.WriteLine("  Motion detection switched off:   " + detection + " cameras");
-        Console.WriteLine("  Pre-record buffer set to 0:      " + buffers + " MJPEG/JPEG cameras");
         Console.WriteLine("  Max redraw rate:                 " + (redraw ? "lowered to 10" : "unchanged"));
         Console.WriteLine("  Your previous settings are saved in " + backup);
     }
