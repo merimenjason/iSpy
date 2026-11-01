@@ -33,9 +33,13 @@ namespace iSpyApplication.Controls
         internal MainForm MainClass;
         private DateTime _lastRun = Helper.Now;
         private Timer _tmrUpdateList;
-        // Redraws the grid at its framerate. Application.Idle alone only fires when other window
-        // messages arrive, so the grid froze when nothing else was repainting (e.g. iSpy minimised).
-        private readonly System.Windows.Forms.Timer _tmrRedraw = new System.Windows.Forms.Timer();
+        // Redraws the grid at its framerate. It can't rely on window messages: Windows only delivers
+        // WM_PAINT and WM_TIMER when nothing else is queued, and with many cameras the main window's
+        // tiles always have a repaint waiting, so the grid (and Application.Idle) never got a turn and
+        // froze on its first frame. A thread-pool timer posts a message instead, and Refresh paints
+        // straight away rather than waiting for WM_PAINT.
+        private System.Threading.Timer _tmrRedraw;
+        private int _redrawPending;
 
         private const int Itempadding = 5;
         private int _maxItems = 36;
@@ -88,7 +92,6 @@ namespace iSpyApplication.Controls
             MainClass = main;
             _owner = owner;
             Program.AppIdle.ApplicationLoopDoWork += HandlerApplicationLoopDoWork;
-            _tmrRedraw.Tick += (s, e) => Invalidate();
             Init();
         }
 
@@ -105,8 +108,9 @@ namespace iSpyApplication.Controls
 
             _maxItems = 36;
 
-            _tmrRedraw.Interval = Math.Max(15, 1000 / Math.Max(1, Cg.Framerate));
-            _tmrRedraw.Start();
+            var interval = Math.Max(15, 1000 / Math.Max(1, Cg.Framerate));
+            _tmrRedraw?.Dispose();
+            _tmrRedraw = new System.Threading.Timer(RedrawTick, null, interval, interval);
 
             Text = Cg.name;
             _controls = new List<GridViewConfig>();
@@ -167,6 +171,35 @@ namespace iSpyApplication.Controls
         }
 
         
+
+        private void RedrawTick(object state)
+        {
+            if (IsDisposed || !IsHandleCreated)
+                return;
+            // Skip this tick if the last redraw hasn't run yet, so requests can't pile up.
+            if (System.Threading.Interlocked.Exchange(ref _redrawPending, 1) == 1)
+                return;
+            try
+            {
+                BeginInvoke((Action) (() =>
+                {
+                    try
+                    {
+                        if (!IsDisposed && Visible)
+                            Refresh();
+                    }
+                    finally
+                    {
+                        _redrawPending = 0;
+                    }
+                }));
+            }
+            catch
+            {
+                // handle went away while closing
+                _redrawPending = 0;
+            }
+        }
 
         void HandlerApplicationLoopDoWork(object sender, EventArgs e)
         {
@@ -316,8 +349,8 @@ namespace iSpyApplication.Controls
             if (disposing)
             {
                 Program.AppIdle.ApplicationLoopDoWork -= HandlerApplicationLoopDoWork;
-                _tmrRedraw.Stop();
-                _tmrRedraw.Dispose();
+                _tmrRedraw?.Dispose();
+                _tmrRedraw = null;
             }
 
             _pAlert.Dispose();
@@ -575,22 +608,13 @@ namespace iSpyApplication.Controls
                                     {
                                         if (cw.Camera != null && cw.GotImage)
                                         {
-                                            // LastFrame returns a fresh copy of the frame: dispose it, or
-                                            // every repaint leaks a full-size bitmap until GDI+ runs out of
-                                            // memory and the grid stops drawing.
-                                            using (var bmp = cw.LastFrame)
-                                            {
-                                                if (bmp != null)
-                                                {
-                                                    if (!Cg.Fill)
-                                                    {
-                                                        rFeed = GetArea(x, y, _itemwidth, _itemheight, bmp.Width, bmp.Height);
-                                                    }
-                                                    gGrid.CompositingMode = CompositingMode.SourceCopy;
-                                                    gGrid.DrawImage(bmp, rFeed);
-                                                    gGrid.CompositingMode = CompositingMode.SourceOver;
-                                                }
-                                            }
+                                            // Draw the latest frame directly instead of taking a copy of it
+                                            // (LastFrame copies the full-size frame on every call).
+                                            gGrid.CompositingMode = CompositingMode.SourceCopy;
+                                            var drawn = cw.DrawLastFrame(gGrid, (w, h) => Cg.Fill ? r : GetArea(x, y, _itemwidth, _itemheight, w, h));
+                                            gGrid.CompositingMode = CompositingMode.SourceOver;
+                                            if (drawn != Rectangle.Empty)
+                                                rFeed = drawn;
 
 
                                             alerted = cw;

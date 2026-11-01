@@ -2571,6 +2571,22 @@ namespace iSpyApplication.Controls
             }
         }
 
+        /// <summary>
+        /// Draws the latest frame into the rectangle chosen by <paramref name="dest"/> (given the frame's width
+        /// and height) without copying it, and returns that rectangle, or Rectangle.Empty if there's no frame.
+        /// </summary>
+        internal Rectangle DrawLastFrame(Graphics g, Func<int, int, Rectangle> dest)
+        {
+            lock (_lockobject)
+            {
+                if (_lastFrame == null)
+                    return Rectangle.Empty;
+                var r = dest(_lastFrame.Width, _lastFrame.Height);
+                g.DrawImage(_lastFrame, r);
+                return r;
+            }
+        }
+
         private Rectangle _rc = Rectangle.Empty;
         internal Rectangle RC
         {
@@ -2656,19 +2672,22 @@ namespace iSpyApplication.Controls
 
                         if (!_minimised)
                         {
-                            var bmp = LastFrame;
-                            if (bmp != null)
+                            // Draw the frame directly rather than copying it first (LastFrame makes a copy).
+                            var frameSize = Size.Empty;
+                            var drawn = DrawLastFrame(gCam, (w, h) =>
+                            {
+                                frameSize = new Size(w, h);
+                                return rc;
+                            });
+                            if (drawn != Rectangle.Empty)
                             {
                                 if (NeedSizeUpdate)
                                 {
                                     AutoSize = true;
-                                    UpdatePosition(bmp.Width, bmp.Height);
+                                    UpdatePosition(frameSize.Width, frameSize.Height);
                                 }
                                 else
                                     AutoSize = false;
-
-                                gCam.DrawImage(bmp, rc.X, rc.Y, rc.Width, rc.Height);
-                                bmp.Dispose();
                             }
                         }
 
