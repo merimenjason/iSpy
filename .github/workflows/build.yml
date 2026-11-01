@@ -26,6 +26,9 @@ jobs:
       - name: Build iSpy
         shell: pwsh
         run: |
+          # Stamp the build (shown in Help > About and the log).
+          $info = "$env:GITHUB_REF_NAME@$($env:GITHUB_SHA.Substring(0, 7)), built $(Get-Date -Format yyyy-MM-dd)"
+          Set-Content BuildInfo.cs "namespace iSpyApplication { internal static class BuildInfo { public const string Description = `"$info`"; } }"
           # SolutionDir: the project's HintPaths use $(SolutionDir)packages\ (forward slashes avoid
           # quoting trouble with a trailing backslash).
           $solutionDir = $PWD.Path.Replace('\', '/') + '/'

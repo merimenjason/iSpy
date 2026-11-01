@@ -35,9 +35,9 @@ namespace iSpyApplication
 
         private void RenderResources()
         {
-            _lblVersion.Text = string.Format("{0}{1} v{2}", 
+            _lblVersion.Text = string.Format("{0}{1} v{2} ({3})", 
                 Application.ProductName, Program.Platform != "x86" ? " 64" : "",
-                Application.ProductVersion);
+                Application.ProductVersion, BuildInfo.Description);
 
             Helper.SetTitle(this);
 

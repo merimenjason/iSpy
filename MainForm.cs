@@ -888,6 +888,7 @@ namespace iSpyApplication
         {
             UISync.Init(this);
             Logger.InitLogging();
+            Logger.LogMessage("iSpy " + Application.ProductVersion + " (" + BuildInfo.Description + ")");
             try
             {
                 File.WriteAllText(Program.AppDataPath + "exit.txt", "RUNNING");
