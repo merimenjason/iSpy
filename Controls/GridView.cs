@@ -33,6 +33,9 @@ namespace iSpyApplication.Controls
         internal MainForm MainClass;
         private DateTime _lastRun = Helper.Now;
         private Timer _tmrUpdateList;
+        // Redraws the grid at its framerate. Application.Idle alone only fires when other window
+        // messages arrive, so the grid froze when nothing else was repainting (e.g. iSpy minimised).
+        private readonly System.Windows.Forms.Timer _tmrRedraw = new System.Windows.Forms.Timer();
 
         private const int Itempadding = 5;
         private int _maxItems = 36;
@@ -85,6 +88,7 @@ namespace iSpyApplication.Controls
             MainClass = main;
             _owner = owner;
             Program.AppIdle.ApplicationLoopDoWork += HandlerApplicationLoopDoWork;
+            _tmrRedraw.Tick += (s, e) => Invalidate();
             Init();
         }
 
@@ -100,7 +104,10 @@ namespace iSpyApplication.Controls
             }
 
             _maxItems = 36;
-            
+
+            _tmrRedraw.Interval = Math.Max(15, 1000 / Math.Max(1, Cg.Framerate));
+            _tmrRedraw.Start();
+
             Text = Cg.name;
             _controls = new List<GridViewConfig>();
             switch (Cg.ModeIndex)
@@ -163,7 +170,7 @@ namespace iSpyApplication.Controls
 
         void HandlerApplicationLoopDoWork(object sender, EventArgs e)
         {
-            if ((Helper.Now - _lastRun).TotalMilliseconds > (1000d/Cg.Framerate))
+            if ((Helper.Now - _lastRun).TotalMilliseconds > (1000d/Math.Max(1, Cg.Framerate)))
             {
                 _lastRun = Helper.Now;
                 Invalidate();
@@ -309,6 +316,8 @@ namespace iSpyApplication.Controls
             if (disposing)
             {
                 Program.AppIdle.ApplicationLoopDoWork -= HandlerApplicationLoopDoWork;
+                _tmrRedraw.Stop();
+                _tmrRedraw.Dispose();
             }
 
             _pAlert.Dispose();
@@ -566,16 +575,21 @@ namespace iSpyApplication.Controls
                                     {
                                         if (cw.Camera != null && cw.GotImage)
                                         {
-                                            var bmp = cw.LastFrame;
-                                            if (bmp != null)
+                                            // LastFrame returns a fresh copy of the frame: dispose it, or
+                                            // every repaint leaks a full-size bitmap until GDI+ runs out of
+                                            // memory and the grid stops drawing.
+                                            using (var bmp = cw.LastFrame)
                                             {
-                                                if (!Cg.Fill)
+                                                if (bmp != null)
                                                 {
-                                                    rFeed = GetArea(x, y, _itemwidth, _itemheight, bmp.Width, bmp.Height);
+                                                    if (!Cg.Fill)
+                                                    {
+                                                        rFeed = GetArea(x, y, _itemwidth, _itemheight, bmp.Width, bmp.Height);
+                                                    }
+                                                    gGrid.CompositingMode = CompositingMode.SourceCopy;
+                                                    gGrid.DrawImage(bmp, rFeed);
+                                                    gGrid.CompositingMode = CompositingMode.SourceOver;
                                                 }
-                                                gGrid.CompositingMode = CompositingMode.SourceCopy;
-                                                gGrid.DrawImage(bmp, rFeed);
-                                                gGrid.CompositingMode = CompositingMode.SourceOver;
                                             }
 
 
@@ -622,12 +636,12 @@ namespace iSpyApplication.Controls
                                     if (fp.Fpobject != null && fp.ImgPlan != null)
                                     {
                                         var bmp = fp.ImgView;
-                                        if (!Cg.Fill)
-                                        {
-                                            rFeed = GetArea(x, y, _itemwidth, _itemheight, bmp.Width, bmp.Height);
-                                        }
                                         if (bmp != null)
                                         {
+                                            if (!Cg.Fill)
+                                            {
+                                                rFeed = GetArea(x, y, _itemwidth, _itemheight, bmp.Width, bmp.Height);
+                                            }
                                             gGrid.DrawImage(bmp, rFeed);
                                         }
                                         if (Cg.Overlays)
