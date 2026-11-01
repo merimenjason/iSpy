@@ -1,0 +1,80 @@
+name: Build
+
+# Builds iSpy (64- and 32-bit Release) with Visual Studio's MSBuild, then the fix installer
+# (tools/FixInstaller) that copies it over an existing iSpy install, with a backup and undo.
+# Code signing is skipped: the signing certificate isn't part of the source.
+
+on:
+  push:
+    branches: [perf, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - uses: NuGet/setup-nuget@v2
+
+      - name: Restore NuGet packages
+        run: nuget restore packages.config -PackagesDirectory packages
+
+      - name: Build iSpy
+        shell: pwsh
+        run: |
+          # SolutionDir: the project's HintPaths use $(SolutionDir)packages\ (forward slashes avoid
+          # quoting trouble with a trailing backslash).
+          $solutionDir = $PWD.Path.Replace('\', '/') + '/'
+          foreach ($platform in 'x64', 'x86') {
+            msbuild iSpy.csproj -m -v:minimal -p:Configuration=Release -p:Platform=$platform `
+              "-p:SolutionDir=$solutionDir" -p:PostBuildEvent=
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            # What the post-build event does, minus signing: the platform's native and managed DLLs.
+            Copy-Item "DLLS\$platform\*" "bin\$platform\Release\" -Force
+          }
+
+      - name: Build the fix installer
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $payload = "tools\FixInstaller\payload"
+          New-Item -ItemType Directory -Force $payload | Out-Null
+          foreach ($platform in 'x64', 'x86') {
+            $out = Resolve-Path "bin\$platform\Release"
+            # iSpy.exe, its config and the managed DLLs it was built against. Native DLLs (FFmpeg, VLC)
+            # stay as installed.
+            $managed = Get-ChildItem "$out\*.dll" | Where-Object {
+              try { [Reflection.AssemblyName]::GetAssemblyName($_.FullName) | Out-Null; $true } catch { $false }
+            } | ForEach-Object Name
+            $files = @('iSpy.exe', 'iSpy.exe.config') + $managed
+            $zip = Join-Path (Resolve-Path $payload) "$platform.zip"
+            if (Test-Path $zip) { Remove-Item $zip }
+            $archive = [IO.Compression.ZipFile]::Open($zip, 'Create')
+            foreach ($f in $files) {
+              [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, (Join-Path $out $f), $f) | Out-Null
+            }
+            $archive.Dispose()
+            Write-Output "$platform payload: $($files.Count) files"
+          }
+          $version = "$env:GITHUB_REF_NAME@$($env:GITHUB_SHA.Substring(0, 7))"
+          dotnet build tools\FixInstaller -c Release "-p:InformationalVersion=$version"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iSpy-Fix-Setup
+          path: tools/FixInstaller/bin/Release/net472/iSpy-Fix-Setup.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iSpy-x64-Release
+          path: bin/x64/Release/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iSpy-x86-Release
+          path: bin/x86/Release/
