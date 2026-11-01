@@ -37,6 +37,7 @@ namespace iSpyApplication.Realtime
         private bool _isConstantFramerate;
 
         private long _lastAudioPts;
+        private long _lastVideoMs = -1;
 
         private DateTime _lastPacket;
         //private double _maxLevel = -1;
@@ -147,25 +148,7 @@ namespace iSpyApplication.Realtime
                 }
             }
 
-            _formatContext = ffmpeg.avformat_alloc_context();
-
-            if (_formatContext == null)
-            {
-                throw new Exception("Cannot allocate format context.");
-            }
-
-            _interruptCallback = InterruptCb;
-            _interruptCallbackAddress = Marshal.GetFunctionPointerForDelegate(_interruptCallback);
-
-            _aviocb = new AVIOInterruptCB_callback_func
-                      {
-                          Pointer = _interruptCallbackAddress
-                      };
-            _formatContext->interrupt_callback.callback = _aviocb;
-            _formatContext->interrupt_callback.opaque = null;
-
-
-            _formatContext->oformat = outputFormat;
+            CreateFormatContext(outputFormat);
 
             AVDictionary* opts = null;
 
@@ -219,6 +202,128 @@ namespace iSpyApplication.Realtime
 
             _frameNumber = 0;
             _opened = true;
+        }
+
+        private void CreateFormatContext(AVOutputFormat* outputFormat)
+        {
+            _formatContext = ffmpeg.avformat_alloc_context();
+
+            if (_formatContext == null)
+            {
+                throw new Exception("Cannot allocate format context.");
+            }
+
+            _interruptCallback = InterruptCb;
+            _interruptCallbackAddress = Marshal.GetFunctionPointerForDelegate(_interruptCallback);
+
+            _aviocb = new AVIOInterruptCB_callback_func
+                      {
+                          Pointer = _interruptCallbackAddress
+                      };
+            _formatContext->interrupt_callback.callback = _aviocb;
+            _formatContext->interrupt_callback.opaque = null;
+
+
+            _formatContext->oformat = outputFormat;
+        }
+
+        /// <summary>
+        /// Opens a file for the camera's own compressed video, written with <see cref="WritePacket"/> as it
+        /// arrives (no decoding or re-encoding). Audio, if any, is encoded from PCM as usual with
+        /// <see cref="WriteAudio"/>.
+        /// </summary>
+        public void OpenPassthrough(string fileName, AVCodecParameters* videoParameters, AVCodecID audioCodec, DateTime created)
+        {
+            CreatedDate = created;
+            Filename = fileName;
+            _abort = false;
+            _ignoreAudio = false;
+            _lastVideoMs = -1;
+            _lastPacket = DateTime.UtcNow;
+
+            var outputFormat = ffmpeg.av_guess_format(null, fileName, null);
+            if (outputFormat == null)
+                throw new Exception("Unknown output format for " + fileName);
+
+            CreateFormatContext(outputFormat);
+
+            if (audioCodec != AVCodecID.AV_CODEC_ID_NONE)
+            {
+                AddAudioStream(audioCodec);
+                OpenAudio();
+            }
+
+            _videoStream = ffmpeg.avformat_new_stream(_formatContext, null);
+            if (_videoStream == null)
+                throw new Exception("Failed creating new video stream.");
+            if (ffmpeg.avcodec_parameters_copy(_videoStream->codecpar, videoParameters) < 0)
+                throw new Exception("Cannot copy the camera's video parameters.");
+            // The RTSP stream's codec tag means nothing in MP4: let the muxer choose.
+            _videoStream->codecpar->codec_tag = 0;
+            _videoStream->time_base = new AVRational {num = 1, den = 1000};
+            _width = videoParameters->width;
+            _height = videoParameters->height;
+
+            AVDictionary* opts = null;
+            if (movflags != "")
+                ffmpeg.av_dict_set(&opts, "movflags", movflags, 0);
+
+            int i;
+            if ((outputFormat->flags & ffmpeg.AVFMT_NOFILE) != ffmpeg.AVFMT_NOFILE)
+            {
+                i = ffmpeg.avio_open2(&_formatContext->pb, fileName, ffmpeg.AVIO_FLAG_WRITE, null, &opts);
+                if (i < 0)
+                {
+                    throw new Exception("Cannot create the video file. (" + i + ")");
+                }
+            }
+
+            i = ffmpeg.avformat_write_header(_formatContext, null);
+            if (i < 0)
+            {
+                throw new Exception("Cannot write header - check disk space (" + i + ")");
+            }
+
+            ffmpeg.av_dict_free(&opts);
+
+            _frameNumber = 0;
+            _opened = true;
+        }
+
+        /// <summary>
+        /// Writes one of the camera's compressed video packets (file opened with <see cref="OpenPassthrough"/>).
+        /// Timestamps come from when the packet arrived, in the same clock as the audio, so they stay in sync
+        /// whatever the camera's own timestamps do.
+        /// </summary>
+        public void WritePacket(AVPacket* source, DateTime timestamp)
+        {
+            if (!_opened)
+            {
+                throw new Exception("A file was not opened yet.");
+            }
+
+            var ms = (long) (timestamp - CreatedDate).TotalMilliseconds;
+            if (ms <= _lastVideoMs)
+                ms = _lastVideoMs + 1;
+            _lastVideoMs = ms;
+
+            var packet = ffmpeg.av_packet_alloc();
+            try
+            {
+                if (ffmpeg.av_packet_ref(packet, source) < 0)
+                    return;
+                packet->pts = packet->dts = ffmpeg.av_rescale_q(ms, new AVRational {num = 1, den = 1000}, _videoStream->time_base);
+                packet->duration = 0;
+                packet->pos = -1;
+                packet->stream_index = _videoStream->index;
+                _lastPacket = DateTime.UtcNow;
+                // av_interleaved_write_frame takes the packet's reference.
+                Log("WRITE_VIDEO_PACKET", ffmpeg.av_interleaved_write_frame(_formatContext, packet));
+            }
+            finally
+            {
+                ffmpeg.av_packet_free(&packet);
+            }
         }
 
         public void Close()

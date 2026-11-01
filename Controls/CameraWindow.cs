@@ -154,6 +154,19 @@ namespace iSpyApplication.Controls
         private bool _requestRefresh;
         private readonly StringBuilder _motionData = new StringBuilder(100000);
 
+        // Passthrough recording: FFmpeg cameras record their own compressed video instead of decoded and
+        // re-encoded frames. Off with <add key="PassthroughRecording" value="false"/> in iSpy.exe.config.
+        private static readonly bool PassthroughEnabled = !string.Equals(
+            System.Configuration.ConfigurationManager.AppSettings["PassthroughRecording"], "false",
+            StringComparison.OrdinalIgnoreCase);
+        private PacketBuffer _packets;
+        private MediaStream _packetSource;
+        private bool _recordingPassthrough;
+        // The frame with the most motion during a passthrough recording, for its thumbnail.
+        private readonly object _passthroughLock = new object();
+        private Bitmap _passthroughPeak;
+        private double _passthroughPeakLevel;
+
         private const int ButtonCount = 8;
         private Rectangle ButtonPanel
         {
@@ -3079,7 +3092,13 @@ namespace iSpyApplication.Controls
 
                 
                 
-                if (Camobject.recorder.bufferseconds > 0 || Recording)
+                if (Recording ? _recordingPassthrough : PassthroughReady)
+                {
+                    // The recording (or the pre-record buffer) is the camera's packets: no frame copies needed.
+                    if (Recording)
+                        TrackPassthroughFrame(e.Frame, Camera.MotionLevel);
+                }
+                else if (Camobject.recorder.bufferseconds > 0 || Recording)
                     Buffer.Enqueue(new Helper.FrameAction(e.Frame, Camera.MotionLevel, Helper.Now));
                 //EnqueueAsync.BeginInvoke(Buffer, new Bitmap(e.Frame), Camera.MotionLevel, Helper.Now, null,null);
                 //else
@@ -3222,8 +3241,24 @@ namespace iSpyApplication.Controls
             }
         }
         [HandleProcessCorruptedStateExceptions]
-        private void Record()
+        private unsafe void Record()
         {
+            // Passthrough: record the camera's own packets (default recording profile, H.264/H.265 FFmpeg sources).
+            var packets = _packets;
+            AVCodecParameters* passthroughParameters = null;
+            DateTime passthroughStart = DateTime.MinValue;
+            _recordingPassthrough = packets != null && Camobject.recorder.profile == 0 &&
+                                    packets.BeginRecording(out passthroughParameters, out passthroughStart);
+            if (_recordingPassthrough)
+            {
+                ClearBuffer();
+                lock (_passthroughLock)
+                {
+                    _passthroughPeak?.Dispose();
+                    _passthroughPeak = null;
+                    _passthroughPeakLevel = 0;
+                }
+            }
             try
             {
                 MainForm.RecordingThreads++;
@@ -3236,7 +3271,11 @@ namespace iSpyApplication.Controls
 
                 Helper.FrameAction fa;
                 DateTime recordingStart = DateTime.UtcNow;
-                if (Buffer.TryPeek(out fa))
+                if (_recordingPassthrough)
+                {
+                    recordingStart = passthroughStart;
+                }
+                else if (Buffer.TryPeek(out fa))
                 {
                     recordingStart = fa.TimeStamp;
                 }
@@ -3289,7 +3328,13 @@ namespace iSpyApplication.Controls
                                 Directory.CreateDirectory(folder);
 
                             
-                            if (bAudio)
+                            if (_recordingPassthrough)
+                            {
+                                _writer = new MediaWriter();
+                                _writer.OpenPassthrough(videopath, passthroughParameters,
+                                    bAudio ? CodecAudio : AVCodecID.AV_CODEC_ID_NONE, recordingStart);
+                            }
+                            else if (bAudio)
                             {
                                 _writer = new MediaWriter
                                           {
@@ -3323,7 +3368,22 @@ namespace iSpyApplication.Controls
                             bool _writtenVideo = false;
                             while (!_stopWrite.WaitOne(5))
                             {
-                                if (Buffer.TryDequeue(out fa))
+                                if (_recordingPassthrough)
+                                {
+                                    while (packets.TryTake(out var item))
+                                    {
+                                        try
+                                        {
+                                            _writer.WritePacket(item.Packet, item.Time);
+                                        }
+                                        finally
+                                        {
+                                            PacketBuffer.Free(item);
+                                        }
+                                        _writtenVideo = true;
+                                    }
+                                }
+                                else if (Buffer.TryDequeue(out fa))
                                 {
                                     WriteFrame(fa, ref maxAlarm, ref peakFrame);
                                     _writtenVideo = true;
@@ -3341,7 +3401,17 @@ namespace iSpyApplication.Controls
                             if (!Directory.Exists(folder + @"thumbs\"))
                                 Directory.CreateDirectory(folder + @"thumbs\");
 
-                            var bmp = peakFrame?.Frame;
+                            Bitmap passthroughPeak = null;
+                            if (_recordingPassthrough)
+                            {
+                                lock (_passthroughLock)
+                                {
+                                    passthroughPeak = _passthroughPeak;
+                                    _passthroughPeak = null;
+                                    maxAlarm = _passthroughPeakLevel;
+                                }
+                            }
+                            var bmp = passthroughPeak ?? peakFrame?.Frame;
                             if (bmp != null)
                             {
                                 try
@@ -3369,6 +3439,7 @@ namespace iSpyApplication.Controls
                                 }
                             }
                             peakFrame?.Dispose();
+                            passthroughPeak?.Dispose();
                         }
                         catch (Exception ex)
                         {
@@ -3391,6 +3462,19 @@ namespace iSpyApplication.Controls
                                 _writer = null;
                             }
                             vc?.StopSaving();
+                            if (_recordingPassthrough)
+                            {
+                                packets.EndRecording();
+                                // The source went away during the recording: nothing else will dispose it.
+                                if (packets != _packets)
+                                    packets.Dispose();
+                            }
+                            if (passthroughParameters != null)
+                            {
+                                var pp = passthroughParameters;
+                                ffmpeg.avcodec_parameters_free(&pp);
+                                passthroughParameters = null;
+                            }
                         }
                         if (_firstFrame)
                         {
@@ -3438,8 +3522,11 @@ namespace iSpyApplication.Controls
                         ff.DurationSeconds = dSeconds;
                         ff.IsTimelapse = false;
                         ff.IsMergeFile = false;
-                        ff.AlertData = Helper.GetMotionDataPoints(_motionData);
-                        _motionData.Clear();
+                        lock (_passthroughLock)
+                        {
+                            ff.AlertData = Helper.GetMotionDataPoints(_motionData);
+                            _motionData.Clear();
+                        }
                         ff.TriggerLevel = (100 - Camobject.detector.minsensitivity); //adjusted
                         ff.TriggerLevelMax = (100 - Camobject.detector.maxsensitivity);
 
@@ -3508,6 +3595,18 @@ namespace iSpyApplication.Controls
             catch (Exception ex)
             {
                 Logger.LogException(ex);
+            }
+            finally
+            {
+                // Normally done when the file closes; this covers a recording that failed before that.
+                if (_recordingPassthrough)
+                {
+                    packets.EndRecording();
+                    if (packets != _packets)
+                        packets.Dispose();
+                }
+                if (passthroughParameters != null)
+                    ffmpeg.avcodec_parameters_free(&passthroughParameters);
             }
             _recordingThread = null;
             _writerStopped.Set();
@@ -4228,6 +4327,7 @@ namespace iSpyApplication.Controls
                     Camera.Alert -= Alert;
                     Camera.PlayingFinished -= VideoDeviceVideoFinished;
                     Camera.ErrorHandler -= CameraWindow_ErrorHandler;
+                    DetachPackets();
 
                     if (Camera?.VideoSource != null)
                     {
@@ -4340,6 +4440,52 @@ namespace iSpyApplication.Controls
             Camera = null;
             _disabling = false;
 
+        }
+
+        private bool PassthroughReady => _packets != null && Camobject.recorder.profile == 0 && _packets.CanRecord;
+
+        private unsafe void AttachPackets(IVideoSource source)
+        {
+            DetachPackets();
+            var stream = source as MediaStream;
+            if (stream == null || !PassthroughEnabled)
+                return;
+            _packets = new PacketBuffer();
+            _packetSource = stream;
+            stream.VideoPacket += OnVideoPacket;
+        }
+
+        private unsafe void DetachPackets()
+        {
+            if (_packetSource != null)
+                _packetSource.VideoPacket -= OnVideoPacket;
+            _packetSource = null;
+            var packets = _packets;
+            _packets = null;
+            // A recording in progress still uses it and disposes it when it ends.
+            if (packets != null && !Recording)
+                packets.Dispose();
+        }
+
+        private unsafe void OnVideoPacket(MediaStream source, AVPacket* packet)
+        {
+            _packets?.Add(source, packet, Helper.Now, Camobject.recorder.bufferseconds);
+        }
+
+        private void TrackPassthroughFrame(Bitmap frame, double level)
+        {
+            lock (_passthroughLock)
+            {
+                _motionData.Append(string.Format(CultureInfo.InvariantCulture, "{0:0.000}", Math.Min(level * 100, 100)));
+                _motionData.Append(",");
+                if (_passthroughPeak == null || level > _passthroughPeakLevel)
+                {
+                    _passthroughPeak?.Dispose();
+                    // A real copy: the frame is disposed once this event returns.
+                    _passthroughPeak = new Bitmap(frame);
+                    _passthroughPeakLevel = level;
+                }
+            }
         }
 
         private void ClearBuffer()
@@ -4943,6 +5089,7 @@ namespace iSpyApplication.Controls
                 Camera.Alert += Alert;
                 Camera.Detect += Detect;
                 Camera.ErrorHandler += CameraWindow_ErrorHandler;
+                AttachPackets(source);
               
                 Calibrating = true;
                 _lastRun = Helper.Now.Ticks;
@@ -5112,6 +5259,7 @@ namespace iSpyApplication.Controls
             Camera.Alert += Alert;
             Camera.Detect += Detect;
             Camera.ErrorHandler += CameraWindow_ErrorHandler;
+            AttachPackets(source);
 
             Camera.PiPConfig = Camobject.settings.pip.config;
 

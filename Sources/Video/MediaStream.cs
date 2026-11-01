@@ -152,6 +152,20 @@ namespace iSpyApplication.Sources.Video
         public event NewFrameEventHandler NewFrame;
         public event PlayingFinishedEventHandler PlayingFinished;
 
+        internal delegate void VideoPacketHandler(MediaStream source, AVPacket* packet);
+
+        /// <summary>
+        /// Every compressed video packet as read, before decoding, on the reading thread. The packet is only
+        /// valid during the call: copy it (av_packet_clone) to keep it. Used for passthrough recording.
+        /// </summary>
+        internal event VideoPacketHandler VideoPacket;
+
+        /// <summary>Goes up each time the stream is opened, so listeners know <see cref="VideoParameters"/> changed.</summary>
+        internal int StreamGeneration { get; private set; }
+
+        /// <summary>The video stream's codec parameters; valid while packets are arriving.</summary>
+        internal AVCodecParameters* VideoParameters => _videoStream == null ? null : _videoStream->codecpar;
+
         public string Source
         {
             get
@@ -488,6 +502,7 @@ namespace iSpyApplication.Sources.Video
                     // get the pointer to the codec context for the video stream
                     _videoCodecContext = _formatContext->streams[i]->codec;
                     _videoStream = _formatContext->streams[i];
+                    StreamGeneration++;
                     break;
                 }
 
@@ -599,6 +614,18 @@ namespace iSpyApplication.Sources.Video
 
                 var nf = NewFrame;
                 var da = DataAvailable;
+
+                if (_videoStream != null && packet.stream_index == _videoStream->index)
+                {
+                    try
+                    {
+                        VideoPacket?.Invoke(this, &packet);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogException(ex, "MediaStream - video packet");
+                    }
+                }
 
                 _lastPacket = DateTime.UtcNow;
                 long pts = packet.pts;

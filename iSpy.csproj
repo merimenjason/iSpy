@@ -519,6 +519,7 @@
       <DependentUpon>PTZConfig.cs</DependentUpon>
     </Compile>
     <Compile Include="Realtime\MediaWriter.cs" />
+    <Compile Include="Realtime\PacketBuffer.cs" />
     <Compile Include="Server\Conf.cs" />
     <Compile Include="Server\ConnectionOption.cs" />
     <Compile Include="Server\HTTPRequest.cs" />
